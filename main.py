@@ -1,75 +1,124 @@
+import sys
 import cv2
 import math
 import numpy as np
+import numpy.typing as npt
 import copy
+import time
 from typing import List
 
-"""
-RGB constants
-B = 0
-G = 1
-R = 2
+# B = 0
+# G = 1
+# R = 2
 
-def pixel_color_difference(a: List[int], b: List[int]) -> int:
-    return math.sqrt((b[R] - a[R])*(b[R] - a[R]) + 
-                     (b[G] - a[G])*(b[G] - a[G]) + 
-                     (b[B] - a[B])*(b[B] - a[B]))
-"""
+# def pixel_color_diff(a: npt.NDArray[np.uint8], b: npt.NDArray[np.uint8]) -> float:
+#     # return np.linalg.norm(a - b)
+#     return math.sqrt((b[R] - a[R])**2 +
+#                      (b[G] - a[G])**2 +
+#                      (b[B] - a[B])**2)
 
-if __name__ == "__main__":
-    image_path = "./tower.jpg"
+def get_density_map(img, rows, cols):
+    ret = np.zeros((rows, cols), dtype=np.float32)
 
-    img = cv2.imread(image_path)
+    for y in range (1, rows - 1):
+        for x in range (1, cols - 1):
+            if y > 0 and x > 0:               ret[y][x] += np.linalg.norm(img[y][x] - img[y-1][x-1])
+            if y > 0:                         ret[y][x] += np.linalg.norm(img[y][x] - img[y-1][x  ])
+            if y > 0 and x < cols - 1:        ret[y][x] += np.linalg.norm(img[y][x] - img[y-1][x+1])
+            if x > 0:                         ret[y][x] += np.linalg.norm(img[y][x] - img[y  ][x-1])
+            if x < cols - 1:                  ret[y][x] += np.linalg.norm(img[y][x] - img[y  ][x+1])
+            if y < rows - 1 and x > 0:        ret[y][x] += np.linalg.norm(img[y][x] - img[y+1][x-1])
+            if y < rows - 1:                  ret[y][x] += np.linalg.norm(img[y][x] - img[y+1][x  ])
+            if y < rows - 1 and x < cols - 1: ret[y][x] += np.linalg.norm(img[y][x] - img[y+1][x+1])
+
+    return ret
+
+remove_count = 200
+
+def remove_seams(img, rows, cols, density_map):
+    for i in range(remove_count):
+        print(f"    {i}/{remove_count}", end="\r")
+
+        cum = np.zeros((rows, cols), dtype=np.float32)
+        cum[0] = density_map[0]
+
+        for y in range(1, rows):
+            for x in range(cols):
+                cum[y, x] = density_map[y, x] + min(
+                    cum[y-1, x-1] if x > 0 else math.inf,
+                    cum[y-1, x],
+                    cum[y-1, x+1] if x < cols-1 else math.inf
+                )
+
+        index = np.argmin(cum[rows-1])
+        carved = [index]
+
+        for y in range(rows-1, 0, -1):
+            start = max(0, index - 1)
+            end = min(cols, index + 2)
+
+            index = start + np.argmin(cum[y-1, start:end])
+            carved.append(index)
+
+        carved.reverse()
+
+        mask = np.ones((rows, cols), dtype=bool)
+        mask[np.arange(rows), carved] = False
+
+        img = img[mask].reshape(rows, cols - 1, 3)
+        density_map = density_map[mask].reshape(rows, cols - 1)
+
+        cols -= 1
+
+in_path      = "tower.jpg"
+out_path     = "carved_tower.jpg"
+density_path = "density_map.jpg"
+
+def main():
+    start = time.monotonic()
+
+    print(f"Reading '{in_path}'...")
+    img = cv2.imread(in_path)
+    if img is None:
+        print(f"ERROR: Could not read image: {in_path}")
+        sys.exit(1)
 
     rows = len(img)
     cols = len(img[0])
-    seams = []
 
-    # calculate weight for each pixel
+    print("Computing density map...")
+    density_map = get_density_map(img.astype(np.float32), rows, cols)
 
-    """
-    ................
-    ................
-    ................
-    ................
-    ................
-    ................
-    ................
-    """
+    print("Gathering average density...")
+    avg = 0
+    for y in range(rows):
+        for x in range(cols):
+            avg += density_map[y][x]
+    avg /= rows * cols
 
-    for x in range(1, cols-1):
-        seam = 0
-        for y in range(1, rows-1):
-            weight = 0
-            middel = np.array(img[y][x])
-            
-            left  = np.array(img[y][x-1])
-            right = np.array(img[y][x+1])
-            up    = np.array(img[y-1][x])
-            down  = np.array(img[y+1][x])
+    print(f"Creating '{density_path}'...")
+    imgcpy = img.copy()
+    for y in range(rows):
+        for x in range(cols):
+            if density_map[y][x] > avg:
+                imgcpy[y][x] = [0, 0, 255 * density_map[y][x] / math.sqrt(3*(255**2))]
 
-            weight += float(np.linalg.norm(middel - left))
-            weight += float(np.linalg.norm(middel - right))
-            weight += float(np.linalg.norm(middel - up))
-            weight += float(np.linalg.norm(middel - down))
+    ok = cv2.imwrite(density_path, imgcpy)
+    if not ok:
+        print(f"ERROR: Failed to create {density_path}")
+        sys.exit(1)
 
-            seam += weight
+    print("Removing seams...")
+    img = remove_seams(img, rows, cols, density_map)
 
-        seams.append(seam)
+    print(f"Creating '{density_path}'...")
+    ok = cv2.imwrite(out_path, img)
+    if not ok:
+        print(f"ERROR: Failed to create {out_path}")
+        sys.exit(1)
 
-    average = sum(seams) / len(seams)
-    delta = (max(seams) - min(seams)) / 2
+    print(f"Elapsed time: {round(time.monotonic() - start, 2)}s")
 
-    for x in range(cols-2):
-        if seams[x] < average - 5:
-            for y in range(rows):
-                img[y][x+1] = [0, 0, 255]
+if __name__ == "__main__":
+    main()
 
-                # TODO: lets kinda remove the seams at some point
-
-    cv2.imwrite("carved_tower.jpg", img)
-
-    print("---------------------------------")
-    print("[INFO] average:", average)
-    print("[INFO] delta:", delta)
-    print("---------------------------------")
